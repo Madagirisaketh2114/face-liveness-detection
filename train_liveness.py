@@ -1,120 +1,64 @@
-# USAGE
-# python train_liveness.py --dataset dataset --model liveness.model --le le.pickle
-
-# set the matplotlib backend so figures can be saved in the background
-import matplotlib
-matplotlib.use("Agg")
-
-# import the necessary packages
-from pyimagesearch.livenessnet import LivenessNet
-from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-from keras.preprocessing.image import ImageDataGenerator
-from keras.optimizers import Adam
-from keras.utils import np_utils
-from imutils import paths
-import matplotlib.pyplot as plt
-import numpy as np
-import argparse
-import pickle
 import cv2
+import numpy as np
+import tensorflow as tf
 import os
+import pickle
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
 
-# construct the argument parser and parse the arguments
-ap = argparse.ArgumentParser()
-ap.add_argument("-d", "--dataset", required=True,
-	help="path to input dataset")
-ap.add_argument("-m", "--model", type=str, required=True,
-	help="path to trained model")
-ap.add_argument("-l", "--le", type=str, required=True,
-	help="path to label encoder")
-ap.add_argument("-p", "--plot", type=str, default="plot.png",
-	help="path to output loss/accuracy plot")
-args = vars(ap.parse_args())
+# Set paths
+dataset_path = r"C:\Users\Dhanush\OneDrive\Desktop\Face-Liveness-Detection\sample_liveness_data"
+model_path = "liveness.model.keras"
+label_encoder_path = "le.pickle"
 
-# initialize the initial learning rate, batch size, and number of
-# epochs to train for
-INIT_LR = 1e-4
-BS = 8
-EPOCHS = 50
-
-# grab the list of images in our dataset directory, then initialize
-# the list of data (i.e., images) and class images
-print("[INFO] loading images...")
-imagePaths = list(paths.list_images(args["dataset"]))
+# Load dataset
 data = []
 labels = []
+categories = ["real", "fake"]
 
-for imagePath in imagePaths:
-	# extract the class label from the filename, load the image and
-	# resize it to be a fixed 32x32 pixels, ignoring aspect ratio
-	label = imagePath.split(os.path.sep)[-2]
-	image = cv2.imread(imagePath)
-	image = cv2.resize(image, (32, 32))
+for category in categories:
+    path = os.path.join(dataset_path, category)
+    label = 1 if category == "real" else 0  # 1 = Real, 0 = Fake
+    for img_name in os.listdir(path):
+        img_path = os.path.join(path, img_name)
+        image = cv2.imread(img_path)
+        if image is None:
+            continue
+        image = cv2.resize(image, (64, 64))
+        data.append(image)
+        labels.append(label)
 
-	# update the data and labels lists, respectively
-	data.append(image)
-	labels.append(label)
+# Convert data to NumPy array and normalize
+data = np.array(data, dtype="float32") / 255.0
+labels = np.array(labels)
 
-# convert the data into a NumPy array, then preprocess it by scaling
-# all pixel intensities to the range [0, 1]
-data = np.array(data, dtype="float") / 255.0
+# Save label encoder
+with open(label_encoder_path, "wb") as f:
+    pickle.dump(categories, f)
 
-# encode the labels (which are currently strings) as integers and then
-# one-hot encode them
-le = LabelEncoder()
-labels = le.fit_transform(labels)
-labels = np_utils.to_categorical(labels, 2)
+# Data augmentation
+datagen = ImageDataGenerator(rotation_range=20, zoom_range=0.15, width_shift_range=0.2,
+                             height_shift_range=0.2, shear_range=0.15, horizontal_flip=True)
 
-# partition the data into training and testing splits using 75% of
-# the data for training and the remaining 25% for testing
-(trainX, testX, trainY, testY) = train_test_split(data, labels,
-	test_size=0.25, random_state=42)
+# Build CNN model
+model = Sequential([
+    Conv2D(32, (3, 3), activation="relu", input_shape=(64, 64, 3)),
+    MaxPooling2D(2, 2),
+    Conv2D(64, (3, 3), activation="relu"),
+    MaxPooling2D(2, 2),
+    Flatten(),
+    Dense(128, activation="relu"),
+    Dropout(0.5),
+    Dense(1, activation="sigmoid")  # Binary classification (Real or Fake)
+])
 
-# construct the training image generator for data augmentation
-aug = ImageDataGenerator(rotation_range=20, zoom_range=0.15,
-	width_shift_range=0.2, height_shift_range=0.2, shear_range=0.15,
-	horizontal_flip=True, fill_mode="nearest")
+# Compile model
+model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
 
-# initialize the optimizer and model
-print("[INFO] compiling model...")
-opt = Adam(lr=INIT_LR, decay=INIT_LR / EPOCHS)
-model = LivenessNet.build(width=32, height=32, depth=3,
-	classes=len(le.classes_))
-model.compile(loss="binary_crossentropy", optimizer=opt,
-	metrics=["accuracy"])
+# Train model
+model.fit(datagen.flow(data, labels, batch_size=32), epochs=10)
 
-# train the network
-print("[INFO] training network for {} epochs...".format(EPOCHS))
-H = model.fit_generator(aug.flow(trainX, trainY, batch_size=BS),
-	validation_data=(testX, testY), steps_per_epoch=len(trainX) // BS,
-	epochs=EPOCHS)
-
-# evaluate the network
-print("[INFO] evaluating network...")
-predictions = model.predict(testX, batch_size=BS)
-print(classification_report(testY.argmax(axis=1),
-	predictions.argmax(axis=1), target_names=le.classes_))
-
-# save the network to disk
-print("[INFO] serializing network to '{}'...".format(args["model"]))
-model.save(args["model"])
-
-# save the label encoder to disk
-f = open(args["le"], "wb")
-f.write(pickle.dumps(le))
-f.close()
-
-# plot the training loss and accuracy
-plt.style.use("ggplot")
-plt.figure()
-plt.plot(np.arange(0, EPOCHS), H.history["loss"], label="train_loss")
-plt.plot(np.arange(0, EPOCHS), H.history["val_loss"], label="val_loss")
-plt.plot(np.arange(0, EPOCHS), H.history["acc"], label="train_acc")
-plt.plot(np.arange(0, EPOCHS), H.history["val_acc"], label="val_acc")
-plt.title("Training Loss and Accuracy on Dataset")
-plt.xlabel("Epoch #")
-plt.ylabel("Loss/Accuracy")
-plt.legend(loc="lower left")
-plt.savefig(args["plot"])
+# Save model
+model.save(model_path)
+print(f"✅ Model saved to {model_path}")
